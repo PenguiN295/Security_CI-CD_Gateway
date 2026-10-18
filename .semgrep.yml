@@ -1,0 +1,15 @@
+rules:
+  - id: flask-idor-missing-owner-check
+    languages:
+      - python
+    severity: ERROR
+    message: >
+      Broken Access Control (IDOR): Querying the 'documents' table without 
+      enforcing an 'owner_id' authorization check in the WHERE clause.
+    patterns:
+      - pattern-inside: |
+          @app.route(...)
+          def $FUNC(...):
+              ...
+      - pattern: $CURSOR.execute("=~/.*FROM documents WHERE.*/", ...)
+      - pattern-not: $CURSOR.execute("=~/.*owner_id.*/", ...)
