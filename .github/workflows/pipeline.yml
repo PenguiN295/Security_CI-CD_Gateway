@@ -45,7 +45,7 @@ jobs:
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai/"
-          LLM_MODEL: "gemini-2.5-flash"
+          LLM_MODEL: "gemini-3.8-flash"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
