@@ -37,10 +37,8 @@ class LLMRemediationClient:
         if not api_key:
             raise EnvironmentError("Missing LLM_API_KEY environment variable.")
         self.model = os.getenv("LLM_MODEL", "gemini-2.5-flash") 
-        self.client = genai.Client(
-            api_key=api_key,
-            http_options={'timeout': 120.0} 
-        )
+        self.client = genai.Client(api_key=api_key)
+
 
     def generate_patch(self, rule_id: str, message: str, code_snippet: str) -> str:
         prompt = (
