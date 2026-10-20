@@ -129,8 +129,7 @@ def main() -> None:
         "## Automated AppSec Gate: Actionable Vulnerabilities Detected",
         f"The CI/CD pipeline intercepted **{len(findings)}** security flaw(s). Build blocked until remediated.\n",
     ]
-
-   Python
+    
 
     for idx, f in enumerate(findings, 1):
         snippet = SourceContextExtractor.get_snippet(f["path"], f["start_line"], f["end_line"])
