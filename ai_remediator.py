@@ -7,7 +7,6 @@ import time
 import requests
 from google import genai
 
-# --- Configuration & Environment Constants ---
 SEMGREP_JSON_PATH = Path("semgrep_results.json")
 CONTEXT_LINES_PADDING = 8
 TARGET_SEVERITIES = {"ERROR", "WARNING"}
@@ -33,21 +32,17 @@ class SourceContextExtractor:
 
 
 class LLMRemediationClient:
-    """Adapter for the native Google Gemini Interactions API."""
-
     def __init__(self) -> None:
         api_key = os.getenv("LLM_API_KEY")
         if not api_key:
             raise EnvironmentError("Missing LLM_API_KEY environment variable.")
-
-        self.model = os.getenv("LLM_MODEL", "gemini-3.8-flash")
+        self.model = os.getenv("LLM_MODEL", "gemini-2.5-flash") 
         self.client = genai.Client(
-            api_key=api_key, 
-            http_options={'timeout': 30.0}
+            api_key=api_key,
+            http_options={'timeout': 120.0} 
         )
 
     def generate_patch(self, rule_id: str, message: str, code_snippet: str) -> str:
-        # We concatenate the system instruction and user payload into a single strict prompt
         prompt = (
             "You are a Principal Application Security Engineer. "
             "Analyze the provided vulnerable Python snippet and SAST finding. "
@@ -60,18 +55,16 @@ class LLMRemediationClient:
         )
 
         try:
-            interaction = self.client.interactions.create(
+            response = self.client.models.generate_content(
                 model=self.model,
-                input=prompt
+                contents=prompt
             )
-            return interaction.output_text
+            return response.text
         except Exception as e:
             return f"**Remediation Generation Failed:** {str(e)}"
 
 
 class GitHubPRReporter:
-    """Publishes consolidated security reviews to GitHub Pull Requests."""
-
     @staticmethod
     def post_comment(markdown_body: str) -> None:
         token = os.getenv("GITHUB_TOKEN")
@@ -129,8 +122,6 @@ def main() -> None:
         "## Automated AppSec Gate: Actionable Vulnerabilities Detected",
         f"The CI/CD pipeline intercepted **{len(findings)}** security flaw(s). Build blocked until remediated.\n",
     ]
-    
-
     for idx, f in enumerate(findings, 1):
         snippet = SourceContextExtractor.get_snippet(f["path"], f["start_line"], f["end_line"])
         print(f"[{idx}/{len(findings)}] Requesting patch for {f['rule_id']}...")
@@ -149,8 +140,6 @@ def main() -> None:
 
     final_markdown = "\n".join(report_sections)
     GitHubPRReporter.post_comment(final_markdown)
-
-    # Policy Enforcement Point: Fail the CI pipeline
     sys.exit(1)
 
 
