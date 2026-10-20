@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from typing import List, Dict, Any
 import requests
-from openai import OpenAI
+from google import genai
 
 # --- Configuration & Environment Constants ---
 SEMGREP_JSON_PATH = Path("semgrep_results.json")
@@ -32,38 +32,37 @@ class SourceContextExtractor:
 
 
 class LLMRemediationClient:
-    def __init__(self) -> None:
-        api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise EnvironmentError("Missing LLM_API_KEY or OPENAI_API_KEY environment variable.")
+    """Adapter for the native Google Gemini Interactions API."""
 
-        base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
-        self.model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=30.0)
+    def __init__(self) -> None:
+        api_key = os.getenv("LLM_API_KEY")
+        if not api_key:
+            raise EnvironmentError("Missing LLM_API_KEY environment variable.")
+
+        self.model = os.getenv("LLM_MODEL", "gemini-3.8-flash")
+        self.client = genai.Client(api_key=api_key)
 
     def generate_patch(self, rule_id: str, message: str, code_snippet: str) -> str:
-        system_prompt = (
+        # We concatenate the system instruction and user payload into a single strict prompt
+        prompt = (
             "You are a Principal Application Security Engineer. "
             "Analyze the provided vulnerable Python snippet and SAST finding. "
             "Respond strictly in Markdown with:\n"
             "1. **Root Cause**: 1-2 terse sentences explaining the exploit vector.\n"
-            "2. **Patched Code**: A drop-in secure Python replacement block."
-        )
-        user_prompt = (
+            "2. **Patched Code**: A drop-in secure Python replacement block.\n\n"
             f"**Rule ID**: `{rule_id}`\n"
             f"**Scanner Message**: {message}\n\n"
             f"**Vulnerable Context (with line numbers)**:\n```python\n{code_snippet}\n```"
         )
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0.1,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        return response.choices[0].message.content or "No remediation generated."
+        try:
+            interaction = self.client.interactions.create(
+                model=self.model,
+                input=prompt
+            )
+            return interaction.output_text
+        except Exception as e:
+            return f"**Remediation Generation Failed:** {str(e)}"
 
 
 class GitHubPRReporter:

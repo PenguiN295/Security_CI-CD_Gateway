@@ -40,12 +40,11 @@ jobs:
         # Do not exit immediately; allow JSON generation so AI Remediator can process findings
         run: |
           semgrep scan --config=auto --config=.semgrep.yml src/ --json -o semgrep_results.json || true
-
+          
       - name: Run AI Remediation & Policy Enforcement Gate
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai/"
-          LLM_MODEL: "gemini-1.5-flash"
+          LLM_MODEL: "gemini-3.8-flash"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
