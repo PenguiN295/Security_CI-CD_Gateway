@@ -3,6 +3,7 @@ import os
 import sys
 from pathlib import Path
 from typing import List, Dict, Any
+import time
 import requests
 from google import genai
 
@@ -40,7 +41,10 @@ class LLMRemediationClient:
             raise EnvironmentError("Missing LLM_API_KEY environment variable.")
 
         self.model = os.getenv("LLM_MODEL", "gemini-3.8-flash")
-        self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(
+            api_key=api_key, 
+            http_options={'timeout': 30.0}
+        )
 
     def generate_patch(self, rule_id: str, message: str, code_snippet: str) -> str:
         # We concatenate the system instruction and user payload into a single strict prompt
@@ -126,16 +130,23 @@ def main() -> None:
         f"The CI/CD pipeline intercepted **{len(findings)}** security flaw(s). Build blocked until remediated.\n",
     ]
 
+   Python
+
     for idx, f in enumerate(findings, 1):
         snippet = SourceContextExtractor.get_snippet(f["path"], f["start_line"], f["end_line"])
+        print(f"[{idx}/{len(findings)}] Requesting patch for {f['rule_id']}...")
+        
         remediation = llm_client.generate_patch(f["rule_id"], f["message"], snippet)
-
+        
+        print(f"[{idx}/{len(findings)}] Patch received successfully.")
+        
         section = (
             f"### {idx}. `{f['rule_id']}` ({f['severity']})\n"
             f"**Location:** `{f['path']}` (Lines {f['start_line']}–{f['end_line']})\n\n"
             f"{remediation}\n\n---"
         )
         report_sections.append(section)
+        time.sleep(3)
 
     final_markdown = "\n".join(report_sections)
     GitHubPRReporter.post_comment(final_markdown)
