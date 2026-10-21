@@ -40,26 +40,21 @@ class LLMRemediationClient:
         self.client = genai.Client(api_key=api_key)
 
 
-    def generate_patch(self, rule_id: str, message: str, code_snippet: str) -> str:
+    def generate_batch_patch(self, aggregated_findings: str) -> str:
         prompt = (
             "You are a Principal Application Security Engineer. "
-            "Analyze the provided vulnerable Python snippet and SAST finding. "
-            "Respond strictly in Markdown with:\n"
-            "1. **Root Cause**: 1-2 terse sentences explaining the exploit vector.\n"
-            "2. **Patched Code**: A drop-in secure Python replacement block.\n\n"
-            f"**Rule ID**: `{rule_id}`\n"
-            f"**Scanner Message**: {message}\n\n"
-            f"**Vulnerable Context (with line numbers)**:\n```python\n{code_snippet}\n```"
+            "Analyze the following SAST findings from a Python pull request. "
+            "For EACH finding, output a numbered Markdown section with:\n"
+            "### [Number]. `[Rule ID]`\n"
+            "- **Root Cause**: 1-2 terse sentences explaining the exploit vector.\n"
+            "- **Patched Code**: A drop-in secure Python replacement block.\n\n"
+            f"{aggregated_findings}"
         )
-
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt
-            )
-            return response.text
-        except Exception as e:
-            return f"**Remediation Generation Failed:** {str(e)}"
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=prompt
+        )
+        return response.text
 
 
 class GitHubPRReporter:
@@ -92,14 +87,19 @@ def parse_findings(json_path: Path) -> List[Dict[str, Any]]:
 
     raw_data = json.loads(json_path.read_text(encoding="utf-8"))
     findings = []
+    seen_lines = set()  #deduplicate overlapping Semgrep rules on the same line
 
     for item in raw_data.get("results", []):
         severity = item.get("extra", {}).get("severity", "INFO")
-        if severity in TARGET_SEVERITIES:
+        start_line = item.get("start", {}).get("line", 1)
+        path = item.get("path")
+
+        if severity in TARGET_SEVERITIES and (path, start_line) not in seen_lines:
+            seen_lines.add((path, start_line))
             findings.append({
                 "rule_id": item.get("check_id"),
-                "path": item.get("path"),
-                "start_line": item.get("start", {}).get("line", 1),
+                "path": path,
+                "start_line": start_line,
                 "end_line": item.get("end", {}).get("line", 1),
                 "severity": severity,
                 "message": item.get("extra", {}).get("message", ""),
@@ -120,23 +120,25 @@ def main() -> None:
         "## Automated AppSec Gate: Actionable Vulnerabilities Detected",
         f"The CI/CD pipeline intercepted **{len(findings)}** security flaw(s). Build blocked until remediated.\n",
     ]
+    payload_blocks = []
     for idx, f in enumerate(findings, 1):
         snippet = SourceContextExtractor.get_snippet(f["path"], f["start_line"], f["end_line"])
-        print(f"[{idx}/{len(findings)}] Requesting patch for {f['rule_id']}...")
-        
-        remediation = llm_client.generate_patch(f["rule_id"], f["message"], snippet)
-        
-        print(f"[{idx}/{len(findings)}] Patch received successfully.")
-        
-        section = (
-            f"### {idx}. `{f['rule_id']}` ({f['severity']})\n"
-            f"**Location:** `{f['path']}` (Lines {f['start_line']}–{f['end_line']})\n\n"
-            f"{remediation}\n\n---"
+        payload_blocks.append(
+            f"Finding #{idx}:\n"
+            f"- Rule ID: {f['rule_id']} ({f['severity']})\n"
+            f"- Location: {f['path']} (Line {f['start_line']})\n"
+            f"- Scanner Message: {f['message']}\n"
+            f"- Code Context:\n```python\n{snippet}\n```\n"
         )
-        report_sections.append(section)
-        time.sleep(3)
 
-    final_markdown = "\n".join(report_sections)
+    print(f"[ALERT] Sending {len(findings)} deduplicated findings in a single batch LLM call...")
+    batch_remediation = llm_client.generate_batch_patch("\n".join(payload_blocks))
+
+    final_markdown = (
+        "## Automated AppSec Gate: Actionable Vulnerabilities Detected\n"
+        f"The CI/CD pipeline intercepted **{len(findings)}** unique security flaw(s). Build blocked until remediated.\n\n"
+        f"{batch_remediation}"
+    )
     GitHubPRReporter.post_comment(final_markdown)
     sys.exit(1)
 
