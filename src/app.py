@@ -30,30 +30,47 @@ def get_user(user_id):
         return jsonify({"id": user[0], "username": user[1]})
     return jsonify({"error": "User not found"}), 404
 
-ALLOWED_DOMAINS = {"api.example.com", "trusted-service.internal"}
 
-def is_safe_url(url: str) -> bool:
+ALLOWED_SCHEMES = {"http", "https"}
+ALLOWED_DOMAINS = {"api.example.com"}
+
+def validate_and_resolve(target_url: str):
+    parsed = urlparse(target_url)
+    if parsed.scheme not in ALLOWED_SCHEMES or parsed.hostname not in ALLOWED_DOMAINS:
+        return None, None
     try:
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return False
-        if parsed.netloc.split(":")[0] not in ALLOWED_DOMAINS:
-            return False
-        ip_addr = socket.gethostbyname(parsed.hostname)
-        ip = ipaddress.ip_address(ip_addr)
-        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved)
+        # Resolve all associated addresses and verify none are non-routable/internal
+        addr_info = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+        for item in addr_info:
+            ip = ipaddress.ip_address(item[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return None, None
+        return parsed, item[4][0]
     except Exception:
-        return False
+        return None, None
 
 @app.route('/api/fetch', methods=['GET'])
 def fetch_url():
     target_url = request.args.get('url')
-    if not target_url or not is_safe_url(target_url):
-        return jsonify({"error": "Invalid or disallowed URL"}), 400
-    if not is_safe_url(target_url):
-        return jsonify({"error": "URL not allowed"}), 400
+    if not target_url:
+        return jsonify({"error": "Missing URL parameter"}), 400
+
+    parsed_url, resolved_ip = validate_and_resolve(target_url)
+    if not parsed_url or not resolved_ip:
+        return jsonify({"error": "Disallowed or invalid host"}), 400
+
+    # Pin resolved IP in the destination to prevent DNS rebinding TOCTOU attacks
+    port = f":{parsed_url.port}" if parsed_url.port else ""
+    pinned_url = f"{parsed_url.scheme}://{resolved_ip}{port}{parsed_url.path or '/'}"
+    headers = {"Host": parsed_url.hostname}
+
     try:
-        response = requests.get(target_url, timeout=3, allow_redirects=False)
+        response = requests.get(
+            pinned_url,
+            headers=headers,
+            timeout=3,
+            allow_redirects=False
+        )
         return jsonify({"status": response.status_code, "data_preview": response.text[:100]})
     except requests.RequestException:
         return jsonify({"error": "Failed to fetch resource"}), 502
