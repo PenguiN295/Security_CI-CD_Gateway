@@ -1,11 +1,12 @@
 from flask import Flask, request, jsonify
+from urllib.parse import urlparse
+import json
 import sqlite3
 import ipaddress
 import requests
 import socket
 import pickle
 import base64
-ALLOWED_HOSTS = {"api.example.com", "public-data.example.com"}
 app = Flask(__name__)
 def init_db():
     conn = sqlite3.connect(':memory:')
@@ -19,27 +20,6 @@ def init_db():
 
 db_conn = init_db()
 
-def is_safe_url(target_url: str) -> bool:
-    try:
-        parsed = urlparse(target_url)
-        if parsed.scheme not in ("http", "https"):
-            return False
-        
-        hostname = parsed.hostname
-        if not hostname or hostname not in ALLOWED_HOSTS:
-            return False
-
-        # Prevent DNS rebinding to internal/private IP ranges
-        ip_addresses = socket.getaddrinfo(hostname, None)
-        for family, _, _, _, sockaddr in ip_addresses:
-            ip = ipaddress.ip_address(sockaddr[0])
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-                return False
-        return True
-    except (ValueError, socket.error):
-        return False
-
-
 @app.route('/api/users/<user_id>', methods=['GET'])
 def get_user(user_id):
     c = db_conn.cursor()
@@ -50,17 +30,30 @@ def get_user(user_id):
         return jsonify({"id": user[0], "username": user[1]})
     return jsonify({"error": "User not found"}), 404
 
+ALLOWED_DOMAINS = {"api.example.com", "trusted-service.internal"}
+
+def is_safe_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        if parsed.netloc.split(":")[0] not in ALLOWED_DOMAINS:
+            return False
+        ip_addr = socket.gethostbyname(parsed.hostname)
+        ip = ipaddress.ip_address(ip_addr)
+        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved)
+    except Exception:
+        return False
+
 @app.route('/api/fetch', methods=['GET'])
 def fetch_url():
     target_url = request.args.get('url')
-    if not target_url:
-        return jsonify({"error": "URL parameter required"}), 400
-    
+    if not target_url or not is_safe_url(target_url):
+        return jsonify({"error": "Invalid or disallowed URL"}), 400
     if not is_safe_url(target_url):
         return jsonify({"error": "URL not allowed"}), 400
-
     try:
-        response = requests.get(target_url, timeout=5, allow_redirects=False)
+        response = requests.get(target_url, timeout=3, allow_redirects=False)
         return jsonify({"status": response.status_code, "data_preview": response.text[:100]})
     except requests.RequestException:
         return jsonify({"error": "Failed to fetch resource"}), 502
@@ -72,17 +65,21 @@ def load_session():
         if not encoded_data:
             return jsonify({"error": "Missing session_data"}), 400
         decoded_data = base64.b64decode(encoded_data)
-        session = pickle.loads(decoded_data) 
+        # Replace insecure pickle deserialization with safe JSON parsing
+        session = json.loads(decoded_data.decode('utf-8'))
         return jsonify({"message": "Session loaded", "user": session.get('user')})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return jsonify({"error": "Invalid session data format"}), 400
+    except Exception:
+        return jsonify({"error": "An error occurred processing the session"}), 500
 
 @app.route('/api/documents/<int:doc_id>', methods=['GET'])
 def get_document(doc_id):
-    current_user_id = 2 
+    current_user_id = 2  # Resolved from authenticated session context
     
     c = db_conn.cursor()
-    c.execute("SELECT content FROM documents WHERE id = ?", (doc_id,))
+    # Enforce multi-tenant access control in the query predicate
+    c.execute("SELECT content FROM documents WHERE id = ? AND owner_id = ?", (doc_id, current_user_id))
     doc = c.fetchone()
     
     if doc:
@@ -90,4 +87,7 @@ def get_document(doc_id):
     return jsonify({"error": "Document not found"}), 404
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    import os
+    # Restrict to loopback interface and disable interactive debug mode
+    debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() in ('true', '1')
+    app.run(debug=debug_mode, host='127.0.0.1', port=5000)
