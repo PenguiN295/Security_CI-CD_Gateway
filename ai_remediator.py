@@ -3,10 +3,10 @@ import os
 import sys
 from pathlib import Path
 from typing import List, Dict, Any
+import time
 import requests
-from openai import OpenAI
+from google import genai
 
-# --- Configuration & Environment Constants ---
 SEMGREP_JSON_PATH = Path("semgrep_results.json")
 CONTEXT_LINES_PADDING = 8
 TARGET_SEVERITIES = {"ERROR", "WARNING"}
@@ -33,42 +33,31 @@ class SourceContextExtractor:
 
 class LLMRemediationClient:
     def __init__(self) -> None:
-        api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("LLM_API_KEY")
         if not api_key:
-            raise EnvironmentError("Missing LLM_API_KEY or OPENAI_API_KEY environment variable.")
+            raise EnvironmentError("Missing LLM_API_KEY environment variable.")
+        self.model = os.getenv("LLM_MODEL", "gemini-2.5-flash") 
+        self.client = genai.Client(api_key=api_key)
 
-        base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
-        self.model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=30.0)
 
-    def generate_patch(self, rule_id: str, message: str, code_snippet: str) -> str:
-        system_prompt = (
+    def generate_batch_patch(self, aggregated_findings: str) -> str:
+        prompt = (
             "You are a Principal Application Security Engineer. "
-            "Analyze the provided vulnerable Python snippet and SAST finding. "
-            "Respond strictly in Markdown with:\n"
-            "1. **Root Cause**: 1-2 terse sentences explaining the exploit vector.\n"
-            "2. **Patched Code**: A drop-in secure Python replacement block."
+            "Analyze the following SAST findings from a Python pull request. "
+            "For EACH finding, output a numbered Markdown section with:\n"
+            "### [Number]. `[Rule ID]`\n"
+            "- **Root Cause**: 1-2 terse sentences explaining the exploit vector.\n"
+            "- **Patched Code**: A drop-in secure Python replacement block.\n\n"
+            f"{aggregated_findings}"
         )
-        user_prompt = (
-            f"**Rule ID**: `{rule_id}`\n"
-            f"**Scanner Message**: {message}\n\n"
-            f"**Vulnerable Context (with line numbers)**:\n```python\n{code_snippet}\n```"
-        )
-
-        response = self.client.chat.completions.create(
+        response = self.client.models.generate_content(
             model=self.model,
-            temperature=0.1,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            contents=prompt
         )
-        return response.choices[0].message.content or "No remediation generated."
+        return response.text
 
 
 class GitHubPRReporter:
-    """Publishes consolidated security reviews to GitHub Pull Requests."""
-
     @staticmethod
     def post_comment(markdown_body: str) -> None:
         token = os.getenv("GITHUB_TOKEN")
@@ -98,14 +87,19 @@ def parse_findings(json_path: Path) -> List[Dict[str, Any]]:
 
     raw_data = json.loads(json_path.read_text(encoding="utf-8"))
     findings = []
+    seen_lines = set()  #deduplicate overlapping Semgrep rules on the same line
 
     for item in raw_data.get("results", []):
         severity = item.get("extra", {}).get("severity", "INFO")
-        if severity in TARGET_SEVERITIES:
+        start_line = item.get("start", {}).get("line", 1)
+        path = item.get("path")
+
+        if severity in TARGET_SEVERITIES and (path, start_line) not in seen_lines:
+            seen_lines.add((path, start_line))
             findings.append({
                 "rule_id": item.get("check_id"),
-                "path": item.get("path"),
-                "start_line": item.get("start", {}).get("line", 1),
+                "path": path,
+                "start_line": start_line,
                 "end_line": item.get("end", {}).get("line", 1),
                 "severity": severity,
                 "message": item.get("extra", {}).get("message", ""),
@@ -126,22 +120,26 @@ def main() -> None:
         "## Automated AppSec Gate: Actionable Vulnerabilities Detected",
         f"The CI/CD pipeline intercepted **{len(findings)}** security flaw(s). Build blocked until remediated.\n",
     ]
-
+    payload_blocks = []
     for idx, f in enumerate(findings, 1):
         snippet = SourceContextExtractor.get_snippet(f["path"], f["start_line"], f["end_line"])
-        remediation = llm_client.generate_patch(f["rule_id"], f["message"], snippet)
-
-        section = (
-            f"### {idx}. `{f['rule_id']}` ({f['severity']})\n"
-            f"**Location:** `{f['path']}` (Lines {f['start_line']}–{f['end_line']})\n\n"
-            f"{remediation}\n\n---"
+        payload_blocks.append(
+            f"Finding #{idx}:\n"
+            f"- Rule ID: {f['rule_id']} ({f['severity']})\n"
+            f"- Location: {f['path']} (Line {f['start_line']})\n"
+            f"- Scanner Message: {f['message']}\n"
+            f"- Code Context:\n```python\n{snippet}\n```\n"
         )
-        report_sections.append(section)
 
-    final_markdown = "\n".join(report_sections)
+    print(f"[ALERT] Sending {len(findings)} deduplicated findings in a single batch LLM call...")
+    batch_remediation = llm_client.generate_batch_patch("\n".join(payload_blocks))
+
+    final_markdown = (
+        "## Automated AppSec Gate: Actionable Vulnerabilities Detected\n"
+        f"The CI/CD pipeline intercepted **{len(findings)}** unique security flaw(s). Build blocked until remediated.\n\n"
+        f"{batch_remediation}"
+    )
     GitHubPRReporter.post_comment(final_markdown)
-
-    # Policy Enforcement Point: Fail the CI pipeline
     sys.exit(1)
 
 
